@@ -1,15 +1,15 @@
 package main
 
 import (
-	"encoding/json"
-	"fmt"
-	"io/ioutil"
-	"log"
-	"net/http"
-	"os"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"hash"
+	"io/ioutil"
+	"log"
+	"net/http"
 
 	triggersv1 "github.com/tektoncd/triggers/pkg/apis/triggers/v1beta1"
 	"k8s.io/client-go/rest"
@@ -21,18 +21,18 @@ import (
 const giteaSecret = "GITEA_SECRET"
 
 type GiteaHookHeader struct {
-	xGiteaDelivery  string   `json:"X-Gitea-Delivery,omitempty"`
-	xGiteaSignature string   `json:"X-Gitea-Signature,omitempty"`
-	xGiteaEvent     string   `json:"X-Gitea-Event,omitempty"`
+	xGiteaDelivery  string `json:"X-Gitea-Delivery,omitempty"`
+	xGiteaSignature string `json:"X-Gitea-Signature,omitempty"`
+	xGiteaEvent     string `json:"X-Gitea-Event,omitempty"`
 }
 
 type GiteaHookParams struct {
-	validEvents     []string `json:"validEvents,omitempty"`
-	secretRef       SecretRef
+	validEvents []string `json:"validEvents,omitempty"`
+	secretRef   SecretRef
 }
 type SecretRef struct {
-	SecretKey  string `json:"secretKey,omitempty"`
-	SecretName string `json:"secretName,omitempty"`
+	secretKey  string `json:"secretKey,omitempty"`
+	secretName string `json:"secretName,omitempty"`
 }
 
 func main() {
@@ -44,20 +44,16 @@ func main() {
 	}
 
 	ctx, startInformer := injection.EnableInjectionOrDie(ctx, clusterConfig)
+	startInformer()
 	secretLister := secretInformer.Get(ctx).Lister()
 
-	var kubeSecret SecretRef
-	secret := os.Getenv(giteaSecret)
-	if secret == "" {
-		log.Fatalf("No secret token given")
-	}
+	http.HandleFunc("/ready", func(writer http.ResponseWriter, request *http.Request) {
+		writer.WriteHeader(http.StatusOK)
+	})
 
-	http.HandleFunc("/", func(writer http.ResponseWriter, request *http.Request) {
+	http.HandleFunc("/gitea", func(writer http.ResponseWriter, request *http.Request) {
 
-		if request.Header.Get("Content-Type") != "application/json" {
-			log.Fatalf("Webhook request has unsupported Content-Type.  Expected \"application/json\"")
-		}
-		var irBody byte[]
+		var irBody []byte
 		if irBody, err = ioutil.ReadAll(request.Body); err != nil {
 			log.Fatalf("failed to parse body: %w", err)
 		}
@@ -68,37 +64,36 @@ func main() {
 		}
 
 		var hookParams GiteaHookParams
-		if err := json.Unmarshal(ir.InterceptorParams, &hookParams); err != nil {
+		params, err := json.Marshal(ir.InterceptorParams)
+		if err := json.Unmarshal(params, &hookParams); err != nil {
 			log.Fatalf("failed to parse Interceptor Params as GiteaHookParams: %w", err)
 		}
 
 		ns, _ := triggersv1.ParseTriggerID(ir.Context.TriggerID)
-		secret, err := secretLister.Secrets(ns).Get(hookParams.SecretRef.SecretName)
+		secret, err := secretLister.Secrets(ns).Get(hookParams.secretRef.secretName)
 		if err != nil {
 			log.Fatalf("error getting secret: %w", err)
 		}
-		secretToken := secret.Data[p.SecretRef.SecretKey]
+		secretToken := secret.Data[hookParams.secretRef.secretKey]
 
-		
 		var hookHeader GiteaHookHeader
-		if err := json.Unmarshal((ir.Header), &hookHeader); err != nil {
+		header, err := json.Marshal(ir.Header)
+		if err := json.Unmarshal((header), &hookHeader); err != nil {
 			log.Fatalf("error getting webhook header as GiteaHookHeader: %w", err)
 		}
-		ns, _ := triggersv1.ParseTriggerID(r.Context.TriggerID)
-
 
 		var hashFunc func() hash.Hash
 		hashFunc = sha256.New
 		mac := hmac.New(hashFunc, secretToken)
 		mac.Write([]byte(ir.Body))
-		expectedSignature := mac.Sum()
+		expectedSignature := mac.Sum(nil)
 		signature, err := hex.DecodeString(hookHeader.xGiteaSignature)
 		if !hmac.Equal(expectedSignature, signature) {
 			http.Error(writer, fmt.Sprint("Signature check Failed: expected - %s, computed - %s", expectedSignature, signature), http.StatusBadRequest)
 		}
-		n, err := writer.Write(request)
+		n, err := writer.Write(irBody)
 		if err != nil {
-			log.Printf("Failed to write response for gitea event ID: %s. Bytes writted: %d. Error: %q", id, n, err)
+			log.Printf("Failed to write response for gitea event. Bytes written: %d. Error: %w", n, err)
 		}
 	})
 	log.Fatal(http.ListenAndServe(fmt.Sprintf(":%d", 8080), nil))
