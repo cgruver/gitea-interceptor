@@ -43,69 +43,80 @@ func main() {
 	ctx, startInformer := injection.EnableInjectionOrDie(ctx, clusterConfig)
 	startInformer()
 
-	http.HandleFunc("/ready", func(writer http.ResponseWriter, request *http.Request) {
-		writer.WriteHeader(http.StatusOK)
-	})
+	http.HandleFunc("/ready", readiness)
 
-	http.HandleFunc("/gitea", func(writer http.ResponseWriter, request *http.Request) {
-
-		var irBody []byte
-		if irBody, err = ioutil.ReadAll(request.Body); err != nil {
-			log.Printf("failed to parse body: %w", err)
-		}
-
-		var ir triggersv1.InterceptorRequest
-		if err := json.Unmarshal(irBody, &ir); err != nil {
-			log.Printf("failed to parse body as InterceptorRequest: %w", err)
-		}
-
-		var hookParams GiteaHookParams
-		params, err := json.Marshal(ir.InterceptorParams)
-		if err != nil {
-			log.Printf("error marshaling json: %w", err)
-		}
-		if err := json.Unmarshal(params, &hookParams); err != nil {
-			log.Printf("failed to parse Interceptor Params as GiteaHookParams: %w", err)
-		}
-
-		secretLister := secretInformer.Get(ctx).Lister()
-		ns, _ := triggersv1.ParseTriggerID(ir.Context.TriggerID)
-		secret, err := secretLister.Secrets(ns).Get(hookParams.Secret.SecretName)
-		if err != nil {
-			log.Printf("error getting secret: %w", err)
-		}
-		secretToken := secret.Data[hookParams.Secret.SecretKey]
-
-		var hookHeader http.Header = ir.Header
-
-		hashFunc := sha256.New
-		mac := hmac.New(hashFunc, secretToken)
-		mac.Write([]byte(ir.Body))
-		computedSignature := mac.Sum(nil)
-		signature, err := hex.DecodeString(hookHeader.Get("X-Gitea-Signature"))
-		if err != nil {
-			log.Printf("error decoding string from byte[] json: %w", err)
-		}
-		log.Printf("Expected - %s", hookHeader.Get("X-Gitea-Signature"))
-		log.Printf("Computed - %s", hex.EncodeToString(computedSignature))
-		if !hmac.Equal(computedSignature, signature) {
-			log.Printf("Signature check Failed")
-			http.Error(writer, fmt.Sprintf("Signature check Failed: expected - %s, computed - %s", hex.EncodeToString(signature), hex.EncodeToString(computedSignature)), http.StatusBadRequest)
-		}
-		var response triggersv1.InterceptorResponse
-		response.Continue = true
-		//response.Status.Message = "Hook Signature Validated"
-
-		r, err := json.Marshal(response)
-		if err != nil {
-			log.Printf("error marshaling json: %w", err)
-		}
-		writer.Header().Add("Content-Type", "application/json")
-
-		n, err := writer.Write(r)
-		if err != nil {
-			log.Printf("Failed to write response for gitea event. Bytes written: %d. Error: %w", n, err)
-		}
-	})
+	http.HandleFunc("/gitea", interceptor)
 	log.Fatal(http.ListenAndServe(fmt.Sprintf(":%d", 8080), nil))
+}
+
+func readiness(writer http.ResponseWriter, request *http.Request) {
+	writer.WriteHeader(http.StatusOK)
+}
+
+func interceptor(writer http.ResponseWriter, request *http.Request) {
+	var irBody []byte
+	if irBody, err = ioutil.ReadAll(request.Body); err != nil {
+		log.Printf("failed to parse body: %w", err)
+	}
+
+	var ir triggersv1.InterceptorRequest
+	if err := json.Unmarshal(irBody, &ir); err != nil {
+		log.Printf("failed to parse body as InterceptorRequest: %w", err)
+	}
+
+	var hookParams GiteaHookParams
+	params, err := json.Marshal(ir.InterceptorParams)
+	if err != nil {
+		log.Printf("error marshaling json: %w", err)
+	}
+	if err := json.Unmarshal(params, &hookParams); err != nil {
+		log.Printf("failed to parse Interceptor Params as GiteaHookParams: %w", err)
+	}
+
+	secretLister := secretInformer.Get(ctx).Lister()
+	ns, _ := triggersv1.ParseTriggerID(ir.Context.TriggerID)
+	secret, err := secretLister.Secrets(ns).Get(hookParams.Secret.SecretName)
+	if err != nil {
+		log.Printf("error getting secret: %w", err)
+	}
+	secretToken := secret.Data[hookParams.Secret.SecretKey]
+
+	var hookHeader http.Header = ir.Header
+
+	hashFunc := sha256.New
+	mac := hmac.New(hashFunc, secretToken)
+	mac.Write([]byte(ir.Body))
+	computedSignature := mac.Sum(nil)
+	signature, err := hex.DecodeString(hookHeader.Get("X-Gitea-Signature"))
+	if err != nil {
+		log.Printf("error decoding string from byte[] json: %w", err)
+		reply(writer, false, fmt.Sprintf("error decoding string from byte[] json: %w", err))
+	}
+	log.Printf("Expected - %s", hookHeader.Get("X-Gitea-Signature"))
+	log.Printf("Computed - %s", hex.EncodeToString(computedSignature))
+
+	if hmac.Equal(computedSignature, signature) {
+		reply(writer, true, "Hook Signature Validated")
+	} else {
+		log.Printf("Signature check Failed: expected - %s, computed - %s", hex.EncodeToString(signature), hex.EncodeToString(computedSignature))
+		reply(writer, false, fmt.Sprintf("Signature check Failed: expected - %s, computed - %s", hex.EncodeToString(signature), hex.EncodeToString(computedSignature)))
+	}
+}
+
+func reply(writer http.ResponseWriter, c bool, m string) error {
+	var response triggersv1.InterceptorResponse
+	response.Continue = c
+	response.Status.Message = m
+	r, err := json.Marshal(response)
+	if err != nil {
+		log.Printf("error marshaling json: %w", err)
+		return err
+	}
+	writer.Header().Add("Content-Type", "application/json")
+	n, err := writer.Write(r)
+	if err != nil {
+		log.Printf("Failed to write response for gitea event. Bytes written: %d. Error: %w", n, err)
+		return err
+	}
+	return nil
 }

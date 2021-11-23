@@ -28,17 +28,6 @@ spec:
           limits:
             memory: 256Mi
             cpu:    500m
-        env:
-        - name: SYSTEM_NAMESPACE
-          valueFrom:
-            fieldRef:
-              fieldPath: metadata.namespace
-        - name: CONFIG_LOGGING_NAME
-          value: config-logging-triggers
-        - name: CONFIG_OBSERVABILITY_NAME
-          value: config-observability-triggers
-        - name: METRICS_DOMAIN
-          value: tekton.dev/triggers
         readinessProbe:
           httpGet:
             path: /ready
