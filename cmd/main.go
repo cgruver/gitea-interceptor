@@ -11,6 +11,7 @@ import (
 	"net/http"
 
 	triggersv1 "github.com/tektoncd/triggers/pkg/apis/triggers/v1beta1"
+	v1 "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/rest"
 	secretInformer "knative.dev/pkg/client/injection/kube/informers/core/v1/secret"
 	"knative.dev/pkg/injection"
@@ -32,6 +33,8 @@ type SecretRef struct {
 	SecretName string `json:"secretName,omitempty"`
 }
 
+var secretLister v1.SecretLister
+
 func main() {
 
 	ctx := signals.NewContext()
@@ -42,6 +45,7 @@ func main() {
 
 	ctx, startInformer := injection.EnableInjectionOrDie(ctx, clusterConfig)
 	startInformer()
+	secretLister = secretInformer.Get(ctx).Lister()
 
 	http.HandleFunc("/ready", readiness)
 
@@ -55,6 +59,8 @@ func readiness(writer http.ResponseWriter, request *http.Request) {
 
 func interceptor(writer http.ResponseWriter, request *http.Request) {
 	var irBody []byte
+	var err error
+
 	if irBody, err = ioutil.ReadAll(request.Body); err != nil {
 		log.Printf("failed to parse body: %w", err)
 	}
@@ -73,7 +79,6 @@ func interceptor(writer http.ResponseWriter, request *http.Request) {
 		log.Printf("failed to parse Interceptor Params as GiteaHookParams: %w", err)
 	}
 
-	secretLister := secretInformer.Get(ctx).Lister()
 	ns, _ := triggersv1.ParseTriggerID(ir.Context.TriggerID)
 	secret, err := secretLister.Secrets(ns).Get(hookParams.Secret.SecretName)
 	if err != nil {
