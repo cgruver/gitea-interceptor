@@ -70,13 +70,30 @@ func interceptor(writer http.ResponseWriter, request *http.Request) {
 		log.Printf("failed to parse body as InterceptorRequest: %w", err)
 	}
 
+	var hookHeader http.Header = ir.Header
+
 	var hookParams GiteaHookParams
 	params, err := json.Marshal(ir.InterceptorParams)
 	if err != nil {
 		log.Printf("error marshaling json: %w", err)
+		reply(writer, false, fmt.Sprintf("error marshaling json: %w", err))
 	}
 	if err := json.Unmarshal(params, &hookParams); err != nil {
 		log.Printf("failed to parse Interceptor Params as GiteaHookParams: %w", err)
+		reply(writer, false, fmt.Sprintf("failed to parse Interceptor Params as GiteaHookParams: %w", err))
+	}
+
+	validEvent := false
+	hookEvent := hookHeader.Get("X-Gitea-Event")
+	for _, event := range hookParams.ValidEvents {
+		if hookEvent == event {
+			validEvent = true
+			break
+		}
+	}
+	if !validEvent {
+		log.Printf("Hook event is not in the Valid Event list: %s", hookEvent)
+		reply(writer, false, fmt.Sprintf("Hook event is not in the Valid Event list: %s", hookEvent))
 	}
 
 	ns, _ := triggersv1.ParseTriggerID(ir.Context.TriggerID)
@@ -85,8 +102,6 @@ func interceptor(writer http.ResponseWriter, request *http.Request) {
 		log.Printf("error getting secret: %w", err)
 	}
 	secretToken := secret.Data[hookParams.Secret.SecretKey]
-
-	var hookHeader http.Header = ir.Header
 
 	hashFunc := sha256.New
 	mac := hmac.New(hashFunc, secretToken)
